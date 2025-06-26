@@ -7,7 +7,7 @@ from langchain.text_splitter import RecursiveCharacterTextSplitter
 from langchain.chains import RetrievalQA
 from langchain.prompts import PromptTemplate
 from langchain.schema import Document
-from langchain_community.document_loaders import TextLoader
+from langchain_community.document_loaders import TextLoader, Docx2txtLoader
 import logging
 import os
 
@@ -23,14 +23,16 @@ logger = logging.getLogger(__name__)
 class Config:
     """Configuration settings for the application."""
     # File paths
-    text_path: str = os.getenv("TEXT_PATH", "material/hr_policy.txt")
+    text_path: str = os.getenv("TEXT_PATH", "RAG/material/hr_policy.txt")
+    docx_path: str = os.getenv("DOCX_PATH", "RAG/material/hr_policy.docx")
     
     # Index names
     text_index_name: str = os.getenv("TEXT_INDEX_NAME", "faiss_index")
+    docx_index_name: str = os.getenv("DOCX_INDEX_NAME", "faiss_index")
     
     # Document processing settings
-    chunk_size: int = int(os.getenv("CHUNK_SIZE", "1000"))
-    chunk_overlap: int = int(os.getenv("CHUNK_OVERLAP", "200"))
+    chunk_size: int = int(os.getenv("CHUNK_SIZE", "500"))
+    chunk_overlap: int = int(os.getenv("CHUNK_OVERLAP", "100"))
     
     # OpenAI settings
     openai_api_key: Optional[str] = os.getenv("OPENAI_API_KEY")
@@ -45,6 +47,8 @@ class Config:
         # Validate file paths
         if not os.path.exists(self.text_path):
             logger.warning(f"Text file not found at {self.text_path}")
+        if not os.path.exists(self.docx_path):
+            logger.warning(f"DOCX file not found at {self.docx_path}")
 
 # Utility functions
 def create_embeddings() -> OpenAIEmbeddings:
@@ -76,24 +80,42 @@ def create_qa_chain(
         llm = ChatOpenAI(temperature=temperature)
         if prompt is None:
             template = """
-            你是公司內部知識庫助理，請根據以下內容回答問題：
+            你是公司內部知識助理，熟悉 Org+ 系統的設計與操作手冊。
 
-            內容：
-            {context}
+    根據以下文件內容回答問題，若無法找到答案請誠實說不知道，不要編造。
 
-            問題：
-            {question}
+文件內容如下：
+----------------
+{context}
+----------------
 
-            ⚠️ 請只根據「內容」回答，不要使用你自己的知識。若無法回答請說「我找不到答案」。
-            """
+問題：{question}
+
+請用條列清楚回答。
+
+注意事項：
+1. 如果問題是關於系統畫面或介面，請詳細描述各個區塊的功能和用途。
+2. 如果問題是關於操作步驟，請按照順序列出具體步驟。
+3. 如果問題是關於特定功能，請說明該功能的主要用途和相關設定。
+4. 請只根據「內容」回答，不要使用你自己的知識。若無法回答請說「我找不到答案」。
+"""
             prompt = PromptTemplate(
                 template=template,
                 input_variables=["context", "question"]
             )
+        
+        # Print the prompt template
+        print("\n使用的 Prompt Template:")
+        print("-------------------")
+        print(prompt.template)
+        print("-------------------\n")
+        
         return RetrievalQA.from_chain_type(
             llm=llm,
             chain_type="stuff",
-            retriever=db.as_retriever(),
+            retriever=db.as_retriever(
+                search_kwargs={"k": 4}
+            ),
             return_source_documents=True,
             chain_type_kwargs={"prompt": prompt}
         )
@@ -127,8 +149,8 @@ def query_qa_chain(qa_chain: RetrievalQA, query: str) -> None:
         print("\nAI 回答：")
         print(result["result"])
         print("\n參考資料：")
-        for doc in result["source_documents"]:
-            print(f"\n{doc.page_content}")
+        #for doc in result["source_documents"]:
+            #print(f"\n{doc.page_content}")
     except Exception as e:
         logger.error(f"Failed to query QA chain: {str(e)}")
         raise
@@ -202,25 +224,31 @@ class BaseDocumentProcessor(ABC):
     def get_prompt_template(self) -> PromptTemplate:
         """Get the prompt template for QA chain."""
         template = """
-你是公司內部知識庫助理，請根據以下內容回答問題。
+            你是公司內部知識助理，熟悉 Org+ 系統的設計與操作手冊。
 
-1. 如果問題是詢問「各種假有幾天」或「報假可以幾天」這類總結性問題，請只列出每種假別的天數（如：特休假、病假、婚假等），不要提供詳細規則或申請流程。
-2. 如果問題是針對某一種假的詳細規則、申請流程或證明文件，才提供該假的詳細資訊。
-3. 請用條列式回答。
-4. 只根據「內容」回答，不要使用你自己的知識。若無法回答請說「我找不到答案」。
+    根據以下文件內容回答問題，若無法找到答案請誠實說不知道，不要編造。
 
-內容：
+文件內容如下：
+----------------
 {context}
+----------------
 
-問題：
-{question}
+問題：{question}
+
+請用條列清楚回答。
+
+注意事項：
+1. 如果問題是關於系統畫面或介面，請詳細描述各個區塊的功能和用途。
+2. 如果問題是關於操作步驟，請按照順序列出具體步驟。
+3. 如果問題是關於特定功能，請說明該功能的主要用途和相關設定。
+4. 請只根據「內容」回答，不要使用你自己的知識。若無法回答請說「我找不到答案」。
 """
         return PromptTemplate(
             template=template,
             input_variables=["context", "question"]
         )
         
-    def test_qa_chain(self, qa_chain, query: str = "報假可以幾天？"):
+    def test_qa_chain(self, qa_chain, query: str = "客戶名稱是什麼？"):
         """Test the QA chain with a query."""
         self.logger.info(f"Testing QA chain with query: {query}")
         query_qa_chain(qa_chain, query)
@@ -240,9 +268,24 @@ class TextProcessor(BaseDocumentProcessor):
         """Get the name for the text FAISS index."""
         return self.config.text_index_name
 
+# DOCX processor
+class DocxProcessor(BaseDocumentProcessor):
+    def load_documents(self):
+        """Load documents from DOCX file."""
+        loader = Docx2txtLoader(self.get_source_path())
+        return loader.load()
+        
+    def get_source_path(self) -> str:
+        """Get the path to the DOCX file."""
+        return self.config.docx_path
+        
+    def get_index_name(self) -> str:
+        """Get the name for the DOCX FAISS index."""
+        return self.config.docx_index_name
+
 def main():
     config = Config()
-    processor = TextProcessor(config)
+    processor = DocxProcessor(config)
     qa_chain = processor.process()
     processor.test_qa_chain(qa_chain)
 
